@@ -1,0 +1,323 @@
+---
+title: "CuttingGardens 2023 Carbon footprint analysis"
+output: html_notebook
+---
+
+Working with results of [this form](https://docs.google.com/forms/d/1dGbXsicczUR3OZ2Hd-3asfE7MmpwIMUqrtk5AqOVxew/edit)
+
+
+
+
+```{r READ DATA message=F}
+library(tidyverse)
+library(ggmap)
+library(geosphere)
+register_google(key=read_file('google_key.txt'))
+googlesheets4::gs4_auth(email = 'maximilien.chaumon@gmail.com')
+
+
+# dum <- geocode('Paris, Fr')
+deaccent <- function(c){
+  c %>%
+    str_replace('é','e')%>%
+    str_replace('ü','ue')%>%
+    str_replace('ö','oe') %>%
+    str_replace('ä','ae') %>%
+    str_replace('á','a') %>%
+    str_replace('italia','italy')
+}
+
+Gardens <- googlesheets4::read_sheet(ss = "https://docs.google.com/spreadsheets/d/1KnPOV7WEIkpPIXy8CLGDY_sIdVI-wC77VXtwqiMN9RM/edit#gid=1863576514",sheet = "Official Gardens' list!",range = "A1:P22" ) %>% 
+  select(`Garden City`, Country, `Number of participants`, lon, lat) %>% 
+  rename(garden.city = `Garden City`, garden.country = `Country`, N = `Number of participants`) %>%
+  mutate(across(is.character, trimws),
+         across(is.character, str_to_lower),
+         across(is.character,deaccent)) %>%
+  unite(garden, garden.city, garden.country, sep = ' ; ', remove = F)
+  
+d <- readr::read_csv('Réponses_Gardens2023.csv',show_col_types = F) %>%
+  rename(garden.city = 2,
+         origin = 3,
+         transport_in = 4,
+         transport_out = 5) %>%
+  filter(garden.city != "I only attended online") %>%
+  filter( ! if_any(contains('transport'), ~ str_detect(.x,'online'))) %>%
+  filter( ! if_any(contains('transport'), ~  str_detect(.x,'Other'))) %>%
+  select(-1,-6) %>%
+  separate(col = origin, into = c('origin.city','origin.country'), sep=';', remove=F) %>%
+  mutate(across(is.character, trimws),
+         across(is.character, str_to_lower),
+         across(is.character,deaccent),
+         transport_out = ifelse(transport_out == 'same as i came!', transport_in, transport_out),
+         across(starts_with('transport'), ~ str_replace(.x, 'city bus / intercity coach', 'city bus')),
+         across(starts_with('transport'), ~ str_replace(.x, 'regional train', 'train'))) %>%
+  unite(col = origin, origin.city, origin.country, sep=' ; ', remove=F)  %>%
+  mutate(origin = ifelse(is.na(origin), garden.city, origin)) %>%
+  left_join(Gardens %>% select(garden, garden.city, garden.country), by = "garden.city")
+
+
+location_codes <- read_csv('locationCodes.csv',col_types = 'ccdd') %>%
+  mutate(across(is.character, str_to_lower)) %>%
+  mutate(across(is.character, trimws)) %>%
+  bind_rows(Gardens %>% rename(origin = garden, city = garden.city, country = garden.country) %>% select(-N)) %>%
+  unite(col = origin, city, country, sep=' ; ', remove=F)  %>%
+  distinct(origin,.keep_all = TRUE) %>%
+  filter(!(is.na(city) | is.na(country)))
+
+allcities <- levels(as.factor(d$origin))
+
+for (c in allcities) {
+  c <- deaccent(c)
+  if (! c %in% location_codes$origin) {
+    lonlat <- geocode(c)
+    cc <- str_split(c, ' ; ')
+    city <- cc[[1]][1]
+    country <- cc[[1]][2]
+    location_codes <- add_row(location_codes,
+                              origin = c,
+                              city = city,
+                              country = country,
+                              lon = lonlat$lon,
+                              lat = lonlat$lat)
+    write_csv(location_codes %>%
+                arrange(country, city) %>%
+                select(country, city, lon, lat),'locationCodes.csv')
+  }
+}
+
+
+country_codes <- read_csv('countryCodes.csv',col_types = 'ddc')  %>%
+  distinct(.keep_all = TRUE)
+allcountries <- levels(as.factor(d$origin.country))
+
+for (c in allcountries) {
+  if (! c %in% country_codes$country) {
+    lonlat <- geocode(c)
+    country_codes <- add_row(country_codes,
+                              country = c,
+                              lon = lonlat$lon,
+                              lat = lonlat$lat)
+    write_csv(country_codes,'countryCodes.csv')
+  }
+}
+location_codes <- location_codes %>%
+  rename(origin.lon = lon, origin.lat = lat) %>%
+  arrange(country, city) %>%
+  select(-city, -country)
+Gardens <- Gardens %>%
+  rename(garden.lon = lon, garden.lat = lat) %>%
+  select(-garden.city, -garden.country)
+country_codes <- country_codes %>%
+  rename(country.lon = lon, country.lat = lat)
+
+
+d <- d %>% left_join(location_codes,by='origin') %>%
+  left_join(country_codes, by = join_by(origin.country == country)) %>%
+  left_join(Gardens %>% select(-N), by = 'garden') %>%
+  mutate(origin.garden.distance_km = distCosine(as.matrix(cbind(origin.lon,origin.lat)),
+                          as.matrix(cbind(garden.lon, garden.lat))) / 1000)
+         
+
+```
+## Response counts
+```{r}
+
+d %>% mutate(Garden = str_to_title(garden), .keep = 'none') %>%
+  group_by(Garden) %>%
+  summarize(n = n())
+
+
+```
+
+## Analysis
+
+For each responding garden, we estimate the amount of CO2 emitted by transportation.
+Following this, we estimate what it would have been if all participants had been travelling to a single location.
+
+### Read Emission Factors
+
+```{r}
+EF <- readr::read_csv("CO2PerPersonTransport.csv", col_types = 'dc') %>%
+  mutate(across(is.character, str_to_lower)) %>%
+  mutate(across(is.character, trimws))
+```
+
+
+### Compute emissions of reported transportation
+
+
+```{r}
+
+nud <- d %>% 
+  left_join(EF, by = join_by(transport_in == transport)) %>%
+  rename(EF_in = EF) %>% 
+  left_join(EF, by = join_by(transport_out == transport)) %>%
+  rename(EF_out = EF) %>%
+  mutate(CO2_in = EF_in * origin.garden.distance_km,
+         CO2_out = EF_out * origin.garden.distance_km,
+         CO2_tot = CO2_in + CO2_out)
+
+nud %>% group_by(origin.country) %>%
+  summarize(CO2_tot = round(sum(CO2_tot)))
+nud %>% 
+  summarize(CO2_tot = round(sum(CO2_tot)))
+```
+## Now assuming a single central location in Paris
+
+```{r}
+TheGarden <- tibble(garden.city = 'Paris', garden.country = 'France') %>%
+  mutate(across(is.character, str_to_lower)) %>%
+  mutate(across(is.character, trimws)) %>% 
+  unite(garden, garden.city, garden.country, sep = ' ; ', remove = F) %>%
+  left_join(location_codes, by = join_by( garden == origin)) %>%
+  rename(garden.lon = origin.lon, garden.lat = origin.lat)
+
+```
+
+With actual means of transportation
+```{r}
+nud <- d %>%
+  select(-starts_with('garden')) %>%
+  bind_cols(TheGarden) %>%
+  mutate(origin.garden.distance_km = distCosine(as.matrix(cbind(origin.lon,origin.lat)),
+                          as.matrix(cbind(garden.lon, garden.lat))) / 1000) %>% 
+  left_join(EF, by = join_by(transport_in == transport)) %>%
+  rename(EF_in = EF) %>% 
+  left_join(EF, by = join_by(transport_out == transport)) %>%
+  rename(EF_out = EF) %>%
+  mutate(CO2_in = EF_in * origin.garden.distance_km,
+         CO2_out = EF_out * origin.garden.distance_km,
+         CO2_tot = CO2_in + CO2_out)
+
+nud %>% group_by(origin.country) %>%
+  summarize(CO2_tot = round(sum(CO2_tot)))
+nud %>% 
+  summarize(CO2_tot = round(sum(CO2_tot)))
+
+```
+
+Assuming all < 500 km use train, above use plane
+
+```{r}
+dmin <- 500
+
+nud <- d %>%
+  select(-starts_with('garden')) %>%
+  bind_cols(TheGarden) %>%
+  mutate(origin.garden.distance_km = distCosine(as.matrix(cbind(origin.lon,origin.lat)),
+                          as.matrix(cbind(garden.lon, garden.lat))) / 1000) %>%
+  mutate(transport_in = ifelse(origin.garden.distance_km < 500, 'train','plane'),
+         transport_out = ifelse(origin.garden.distance_km < 500, 'train','plane')) %>%
+  left_join(EF, by = join_by(transport_in == transport)) %>%
+  rename(EF_in = EF) %>% 
+  left_join(EF, by = join_by(transport_out == transport)) %>%
+  rename(EF_out = EF) %>%
+  mutate(CO2_in = EF_in * origin.garden.distance_km,
+         CO2_out = EF_out * origin.garden.distance_km,
+         CO2_tot = CO2_in + CO2_out)
+
+nud %>% group_by(origin.country) %>%
+  summarize(CO2_tot = round(sum(CO2_tot)))
+nud %>%
+  summarize(CO2_tot = sum(CO2_tot))
+
+
+```
+
+## Estimation tenant compte des effectifs
+
+Dans chaque Garden, on bootstrap parmi les moyens de transport utilisés
+
+```{r}
+nud <- d %>% 
+  left_join(EF, by = join_by(transport_in == transport)) %>%
+  rename(EF_in = EF) %>% 
+  left_join(EF, by = join_by(transport_out == transport)) %>%
+  rename(EF_out = EF) %>%
+  mutate(CO2_in = EF_in * origin.garden.distance_km,
+         CO2_out = EF_out * origin.garden.distance_km,
+         CO2_tot = CO2_in + CO2_out) %>%
+  left_join(Gardens, by = 'garden')
+
+# for each garden, bootstrap resample the right number of pple
+rsmpd <- tibble()
+for (g in levels(as.factor(nud$garden))) {
+  tmp <- filter(nud,garden == g)
+  N <- Gardens %>%
+    filter(garden == g) %>%
+    .$N
+  for (isim in 1:100) {
+    rsmpd <- tmp[sample(1:nrow(tmp),size = N, replace = T),] %>%
+      group_by(garden) %>%
+      summarize(CO2_tot = sum(CO2_tot),
+                garden.city = first(garden.city),
+                garden.country = first(garden.country)) %>%
+      bind_rows(rsmpd)
+  }
+}
+rsmpds <- rsmpd %>%
+  group_by(garden, garden.city, garden.country) %>%
+  summarize(sdCO2_tot = sd(CO2_tot),
+            mCO2_tot = mean(CO2_tot))
+
+ggplot(rsmpds, aes(x="", y=mCO2_tot, fill=garden)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0)  +
+  geom_text(aes(label = paste(garden.country, round(mCO2_tot))), position = position_stack(vjust=0.5)) +
+  labs(x = NULL, y = NULL, fill = NULL)
+
+rsmpds %>% ungroup() %>% summarize(CO2_tot = sum(mCO2_tot))
+
+ggplot(rsmpd,aes(x=CO2_tot,fill = garden)) +
+  geom_histogram(position='dodge', bins = 10, show.legend = F) +
+  facet_wrap(~garden,
+             scales = "free_x")
+
+ggplot(rsmpds, aes(x=))
+
+f <- function(tmp,toto) {
+  N <- unique(tmp$N)
+  tmp[sample(1:nrow(tmp), size = N, replace = T),]
+}
+tmp <- nud %>%
+  group_by(garden) %>%
+  group_modify(f)
+
+
+tmp %>% group_by(garden) %>%
+  summarize(N = n()) %>%
+  summarize(N = sum(N))
+
+
+
+```
+
+
+
+<!-- ## Estimation d'erreur par bootstrap -->
+
+<!-- Pour chaque garden, on pioche N fois parmi les data qu'on a, compute le CO2, store. -->
+
+<!-- ```{r} -->
+<!-- nboot <- 100 -->
+<!-- library(boot) -->
+<!-- f <- function(dd, i) { -->
+<!--   dd <- dd[i,] -->
+<!--   dd %>% group_by(garden) %>% -->
+<!--       summarize(CO2_tot = sum(CO2_tot)) %>% -->
+<!--       .$CO2_tot -->
+<!--   } -->
+
+<!-- nud <- d  %>% -->
+<!--   left_join(EF, by = join_by(transport_in == transport)) %>% -->
+<!--   rename(EF_in = EF) %>%  -->
+<!--   left_join(EF, by = join_by(transport_out == transport)) %>% -->
+<!--   rename(EF_out = EF) %>% -->
+<!--   mutate(CO2_in = EF_in * origin.garden.distance_km, -->
+<!--          CO2_out = EF_out * origin.garden.distance_km, -->
+<!--          CO2_tot = CO2_in + CO2_out) -->
+
+<!-- boot(data = nud, statistic = f, R = nboot, stype = 'i') -->
+
+<!-- ``` -->
+
