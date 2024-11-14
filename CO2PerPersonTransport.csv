@@ -1,12 +1,12 @@
 EF,transport
-0.00506,Train
-0.16,Intercity coach
-0.0057,Metro or RER
-0.25,Plane
-0.259,Car
+0.037,Train
+0.0306,Intercity coach
+0.004,Metro or RER
+0.1875,Plane
+0.2156,Car
 0,Feet
 0,Bike
-0.16,City bus
+0.137,City bus
 0, Muscule-Powered
 
 
