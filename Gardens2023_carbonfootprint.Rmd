@@ -1,16 +1,23 @@
 ---
 title: "CuttingGardens 2023 Carbon footprint analysis"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
 ---
 
 Working with results of [this form](https://docs.google.com/forms/d/1dGbXsicczUR3OZ2Hd-3asfE7MmpwIMUqrtk5AqOVxew/edit)
 
 ## Read data
 ```{r READ DATA, message=FALSE}
+set.seed(123)
 library(tidyverse)
 library(ggmap)
 library(geosphere)
 library(patchwork)
+library(kableExtra)
+
 register_google(key=read_file('google_key.txt'))
 googlesheets4::gs4_auth(email = 'maximilien.chaumon@gmail.com')
 
@@ -116,13 +123,20 @@ d <- d %>% left_join(location_codes,by='origin') %>%
   mutate(origin.garden.distance_km = distCosine(as.matrix(cbind(origin.lon,origin.lat)),
                           as.matrix(cbind(garden.lon, garden.lat))) / 1000)
          
+scenarios <- tibble(Scenario = c('Cutting Gardens', 'One Location', 'Online'), 
+                    Description = c('Each participant is assumed to travel to the garden closest to them', 
+                                    'All participants are assumed to travel to a single location in Paris', 
+                                    'All participants are assumed to attend online'),
+                    `CO2 emissions (kg)` = c(NA,NA,NA),
+                    `Standard deviation (kg)` = c(NA,NA,NA))
+
+
 
 ```
 
 ## Response counts per garden
 
 ```{r count responses, rows.print=100}
-library(kableExtra)
 
 tokable <- d %>% mutate(Garden = str_to_title(garden), .keep = 'none') %>%
   group_by(Garden) %>%
@@ -231,13 +245,23 @@ rsmpds <- rsmpd %>%
   group_by(garden, garden.city, garden.country) %>%
   summarize(sdCO2_tot = sd(CO2_tot),
             mCO2_tot = mean(CO2_tot))
-rsmpds %>% mutate(mCO2_tot = round(mCO2_tot),
+
+(tmp <- rsmpds %>% mutate(mCO2_tot = round(mCO2_tot),
               sdCO2_tot = round(sdCO2_tot)) %>%
   ungroup()%>%
   select(garden, mCO2_tot, sdCO2_tot) %>%
-  bind_rows(tibble(garden = 'Total',
+  bind_rows((tibble(garden = 'Total',
                    mCO2_tot = sum(.$mCO2_tot),
-                   sdCO2_tot = round(sqrt(sum(.$sdCO2_tot^2)))))
+                   sdCO2_tot = round(sqrt(sum(.$sdCO2_tot^2))))))) %>%
+  kable(caption = 'Estimated CO2eq emissions due to transportation in the Cutting Gardens Scenario', col.names = c('Garden', 'Average CO2 emissions (kg)', 'standard deviation (kg)') ) %>% 
+  kable_styling(latex_options = "striped") %>% row_spec(1:(nrow(rsmpds)+1), extra_css = "padding: 0px") %>%
+  row_spec(nrow(rsmpds)+1, bold = T)
+
+scenarios <- scenarios %>%
+  mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "Cutting Gardens", tmp %>% filter(garden == 'Total') %>% .$mCO2_tot),
+         `Standard deviation (kg)` = replace(`Standard deviation (kg)`, Scenario == "Cutting Gardens", tmp %>% filter(garden == 'Total') %>% .$sdCO2_tot))
+
+
 ```
 
 
@@ -251,7 +275,7 @@ rsmpds %>%
   kable(caption = 'Estimated CO2eq emissions due to transportation in the Cutting Gardens Scenario', col.names = c('Garden', 'Average CO2 emissions (kg)', 'standard deviation (kg)'),
         digits = 0) %>%
   kable_styling(latex_options = "striped") %>%
-  row_spec(1:nrow(rsmpds)+1, extra_css = "padding: 0px") %>%
+  row_spec(1:(nrow(rsmpds)+1), extra_css = "padding: 0px") %>%
   row_spec(nrow(rsmpds)+1, bold = T)
 
 # a barplot based on rsmpds with x = garden, y = emissions, color = garden, with errorbars = sd
@@ -259,6 +283,8 @@ ggplot(rsmpds %>% mutate(mCO2_tot = mCO2_tot / 1000, sdCO2_tot = sdCO2_tot / 100
   geom_bar(stat="identity", width=1, color = 'black', show.legend = F) +
   geom_errorbar(aes(ymin=mCO2_tot-sdCO2_tot, ymax=mCO2_tot+sdCO2_tot), width=.2,
                 position=position_dodge(1)) +
+  # add a layer of dots with individual values picked from rsmpd
+  # geom_point(data = rsmpd %>% filter(garden != 'Total'), aes(x=garden, y=CO2_tot / 1000), position = position_jitterdodge(.2), alpha = 0.2, show.legend = F) +
   coord_flip() +
   labs(x = NULL, y = expression(paste('CO2 emissions (10'^'3',' kg)')), fill = NULL) +
   theme_minimal()
@@ -295,12 +321,13 @@ TheGarden <- tibble(garden.city = 'Paris', garden.country = 'France') %>%
 
 Assuming all \< a certain distance use train, above use plane
 
-```{r}
-alldmin <- seq(300,1500,10)
+```{r, fig.width=7, fig.height=4}
+alldmin <- seq(300,1500,50)
 nrep <- 10
 
 toplot = tibble()
 for (dmin in alldmin) { 
+  # below, we compute distances and CO2 to TheGarden on the fly and restore original garden names afterwards
   nud <- d %>%
     rename_with(.cols = starts_with('garden'),.fn =  ~ paste0('actual.',.x)) %>%
     bind_cols(TheGarden) %>%
@@ -318,6 +345,7 @@ for (dmin in alldmin) {
            CO2_out = EF_out * origin.garden.distance_km,
            CO2_tot = CO2_in + CO2_out)
   
+  # So in nud, all distances refer to TheGarden
   
   # for each garden, bootstrap resample the right number of pple, compute CO2, store
   rsmpd <- tibble()
@@ -342,35 +370,37 @@ for (dmin in alldmin) {
     }
   }
   # at this point, we have nrep resampled CO2 emission estimates for each garden
-  # now compute the mean and sd of these estimates for each garden
+  # for a given dmin in rsmpd
+  # now compute the mean and sd of these estimates for each garden and the total
   rsmpds <- rsmpd %>%
     group_by(garden, garden.city, garden.country) %>%
     summarize(sdCO2_tot = sd(CO2_tot),
-              mCO2_tot = mean(CO2_tot), .groups = 'drop')
-  # rsmpds %>% mutate(mCO2_tot = round(mCO2_tot),
-  #                   sdCO2_tot = round(sdCO2_tot)) %>%
-  #   ungroup()%>%
-  #   select(garden, mCO2_tot, sdCO2_tot) %>%
-  #   bind_rows(tibble(garden = 'Total',
-  #                    mCO2_tot = sum(.$mCO2_tot),
-  #                    sdCO2_tot = round(sqrt(sum(.$sdCO2_tot^2)))))
-  
-  
-  tmp <- nud %>% group_by(garden) %>%
-    summarize(CO2_tot = round(sum(CO2_tot))) %>%
+              mCO2_tot = mean(CO2_tot), .groups = 'drop') %>%
     bind_rows(tibble(garden = 'Total',
-                     CO2_tot = sum(.$CO2_tot)))
-  
-  toplot <- tmp %>% filter(garden == 'Total') %>%
+                     mCO2_tot = sum(.$mCO2_tot),
+                     sdCO2_tot = round(sqrt(sum(.$sdCO2_tot^2)))))
+  # for plotting, we only keep the total
+  toplot <- rsmpds %>% filter(garden == 'Total') %>%
     mutate(dmin = dmin) %>%
-    select(dmin,garden,CO2_tot) %>%
+    select(dmin,garden,mCO2_tot, sdCO2_tot) %>%
     bind_rows(toplot)
+  
+  if (dmin == 800) {
+    # we store the result in the scenario table only for dmin = 800 km
+    scenarios <- scenarios %>%
+      mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "One Location", rsmpds %>% filter(garden == 'Total') %>% .$mCO2_tot),
+             `Standard deviation (kg)` = replace(`Standard deviation (kg)`, Scenario == "One Location", rsmpds %>% filter(garden == 'Total') %>% .$sdCO2_tot))  
+  }
 }
 
-p1 <- ggplot(toplot, aes(x=dmin, y=CO2_tot / 1000)) +
+p1 <- ggplot(toplot, aes(x=dmin, y=mCO2_tot / 1000,
+                         ymin = (mCO2_tot - sdCO2_tot) / 1000,
+                         ymax = (mCO2_tot + sdCO2_tot) / 1000)) +
+  geom_ribbon(alpha = 0.2) +
   geom_line() +
   # geom_point() +
   # scale_x_reverse() +
+  # ylim(1000, 1300) +
   labs(x = 'Distance threshold for flying (km)', y = 'Total CO2 emissions (tons)', title = 'Conference CO2 emissions as a function of \ndistance for switching from train to plane') + 
   theme_minimal()
 
@@ -384,5 +414,166 @@ p2
 
 ```
 
+## Now same computation for any central garden
 
+```{r, fig.width=7, fig.height=4}
+toplot = tibble()
+alldmin <- seq(300,1500,50)
+nrep <- 10
+allGardens_plusBaryCenter = Gardens
+# %>%
+#   bind_rows( summarize(Gardens, garden = 'Barycenter', 
+#                        garden.lon = weighted.mean(garden.lon,N),
+#                        garden.lat = weighted.mean(garden.lat,N), 
+#                        N = sum(N)))
+
+for (i_garden in 1:nrow(allGardens_plusBaryCenter)){
+
+  TheGarden <- allGardens_plusBaryCenter[i_garden,]
+  
+  
+  for (dmin in alldmin) { 
+    # below, we compute distances and CO2 to TheGarden on the fly and restore original garden names afterwards
+    nud <- d %>%
+      rename_with(.cols = starts_with('garden'),.fn =  ~ paste0('actual.',.x)) %>%
+      bind_cols(TheGarden) %>%
+      mutate(origin.garden.distance_km = distCosine(as.matrix(cbind(origin.lon,origin.lat)),
+                                                    as.matrix(cbind(garden.lon, garden.lat))) / 1000) %>%
+      select(-starts_with('garden')) %>%
+      rename_with(.cols = starts_with('actual'),.fn =  ~ str_remove(.x,'actual.')) %>%
+      mutate(transport_in = ifelse(origin.garden.distance_km < dmin, 'train','plane'),
+             transport_out = ifelse(origin.garden.distance_km < dmin, 'train','plane')) %>%
+      left_join(EF, by = join_by(transport_in == transport)) %>%
+      rename(EF_in = EF) %>% 
+      left_join(EF, by = join_by(transport_out == transport)) %>%
+      rename(EF_out = EF) %>%
+      mutate(CO2_in = EF_in * origin.garden.distance_km,
+             CO2_out = EF_out * origin.garden.distance_km,
+             CO2_tot = CO2_in + CO2_out)
+    
+    # So in nud, all distances refer to TheGarden
+    
+    # for each garden, bootstrap resample the right number of pple, compute CO2, store
+    rsmpd <- tibble()
+    # for each garden
+    for (g in levels(as.factor(nud$garden))) {
+      # focus on data of that garden
+      tmp <- filter(nud,garden == g)
+      if (sum(tmp$CO2_tot) == 0) next
+      # get the number of participants
+      N <- Gardens %>%
+        filter(garden == g) %>%
+        .$N
+      # for each resampling
+      for (isim in 1:nrep) {
+        # pick with replacement N participants
+        rsmpd <- tmp[sample(1:nrow(tmp),size = N, replace = T),] %>%
+          summarize(CO2_tot = sum(CO2_tot),
+                    garden = first(garden),
+                    garden.city = first(garden.city),
+                    garden.country = first(garden.country)) %>%
+          bind_rows(rsmpd)
+      }
+    }
+    # at this point, we have nrep resampled CO2 emission estimates for each garden
+    # for a given dmin in rsmpd
+    # now compute the mean and sd of these estimates for each garden and the total
+    rsmpds <- rsmpd %>%
+      group_by(garden, garden.city, garden.country) %>%
+      summarize(sdCO2_tot = sd(CO2_tot),
+                mCO2_tot = mean(CO2_tot), .groups = 'drop') %>%
+      bind_rows(tibble(garden = 'Total',
+                       mCO2_tot = sum(.$mCO2_tot),
+                       sdCO2_tot = round(sqrt(sum(.$sdCO2_tot^2)))))
+    # for plotting, we only keep the total
+    toplot <- rsmpds %>% filter(garden == 'Total') %>%
+      mutate(garden = TheGarden$garden) %>%
+      mutate(dmin = dmin) %>%
+      select(dmin,garden,mCO2_tot, sdCO2_tot) %>%
+      bind_rows(toplot)
+    
+    # if (dmin == 800) {
+    #   # we store the result in the scenario table only for dmin = 800 km
+    #   scenarios <- scenarios %>%
+    #     mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "One Location", rsmpds %>% filter(garden == 'Total') %>% .$mCO2_tot),
+    #            `Standard deviation (kg)` = replace(`Standard deviation (kg)`, Scenario == "One Location", rsmpds %>% filter(garden == 'Total') %>% .$sdCO2_tot))  
+    # }
+    
+  }
+}
+```
+
+
+```{r, fig.width=7, fig.height=4}
+toplot <-  toplot %>%
+       # capitalize garden names
+       mutate(garden = str_to_title(garden)) %>%
+         # capitalize UK and USA in garden names
+         mutate(garden = str_replace(garden, 'Uk', 'UK')) %>%
+         mutate(garden = str_replace(garden, 'Usa', 'USA'))%>%
+         # rearrange garden factor levels by mCO2_tot using package forcats
+         mutate(garden = fct_reorder(garden, -mCO2_tot))
+         # move Barycenter last
+         # mutate(garden = fct_relevel(garden, 'Barycenter', after = Inf))
+
+ggplot(toplot, aes(x=dmin, y=mCO2_tot / 1000,
+                         ymin = (mCO2_tot - sdCO2_tot) / 1000,
+                         ymax = (mCO2_tot + sdCO2_tot) / 1000,
+             col = garden, group = garden)) +
+  # geom_ribbon(alpha = 0.2) +
+  geom_line() +
+  # geom_point() +
+  # scale_x_reverse() +
+  # ylim(1000, 1300) +
+  labs(x = 'Distance threshold for flying (km)', y = 'Total CO2 emissions (tons)',) +
+  # ggtitle('Conference CO2 emissions as a function of \ndistance for switching from train to plane') + 
+  theme_minimal()
+# highlight Barycenter values with a different line width
+  # geom_line(data = toplot %>% filter(garden == 'Barycenter'), size = 1.5, show.legend = F)
+  
+# # a tile plot showing mCO2_tot in color for each garden. x is dmin, y is garden, color is mCO2_tot
+# ggplot(toplot,
+#        aes(x=dmin, y=garden, fill=mCO2_tot / 1000)) +
+#   geom_tile() +
+#   # # add written values at dmin = 300 (align left),
+#   geom_label(data = toplot %>% filter(dmin == 300), aes(label = round(mCO2_tot / 1000)), hjust = 0, vjust = .6, col = 'white') +
+#   # # add written values at dmin = 1500 (align right)
+#   geom_label(data = toplot %>% filter(dmin == 1500), aes(label = round(mCO2_tot / 1000)), hjust = 1, vjust = .6, col = 'white') +
+#   scale_fill_viridis_c() +
+#   labs(x = 'Distance threshold for flying (km)', y = 'Garden', fill = 'Total CO2 emissions (tons)') +
+#   theme_minimal()
+
+
+#print the minimal mCO2_tot row
+toplot %>% filter(mCO2_tot == min(mCO2_tot))
+
+# print the maximal mCO2_tot row
+toplot %>% filter(mCO2_tot == max(mCO2_tot))
+
+# print the row where mCO2_tot is minimal at dmin is 800
+toplot %>% filter(dmin == 800) %>% filter(mCO2_tot == min(mCO2_tot))
+
+```
+
+## Conclusion
+```{r}
+scenarios <- scenarios %>%
+mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "Online", 5512)) 
+
+
+scenarios %>%
+  kable(caption = 'Summary of CO2 emissions for the different scenarios', col.names = c('Scenario', 'Description', 'CO2 emissions (kg)', 'Standard deviation (kg)'),
+        digits = 0) %>%
+  kable_styling(latex_options = "striped")
+
+ggplot(scenarios, aes(x = Scenario, y = `CO2 emissions (kg)`, fill = Scenario)) +
+  geom_bar(stat = 'identity') +
+  geom_errorbar(aes(ymin = `CO2 emissions (kg)` - `Standard deviation (kg)`, ymax = `CO2 emissions (kg)` + `Standard deviation (kg)`), width = 0.1) +
+  labs(x = "Scenario", y = 'CO2 emissions (kg)', fill = NULL) +
+  scale_fill_manual(values = c("#3CAF46", "#FF3838", "grey")) +
+  # scale_y_log10() +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+
+```
 
