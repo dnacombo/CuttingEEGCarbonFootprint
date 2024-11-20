@@ -1,5 +1,6 @@
 ---
 title: "CuttingGardens 2023 Carbon footprint analysis"
+date: today
 output:
   html_document:
     df_print: paged
@@ -123,12 +124,14 @@ d <- d %>% left_join(location_codes,by='origin') %>%
   mutate(origin.garden.distance_km = distCosine(as.matrix(cbind(origin.lon,origin.lat)),
                           as.matrix(cbind(garden.lon, garden.lat))) / 1000)
          
-scenarios <- tibble(Scenario = c('Cutting Gardens', 'One Location', 'Online'), 
+scenarios <- tibble(Scenario = c('Cutting Gardens',"One Location in XXX", 'One Location (min)', 'One Location (max)', 'Online'), 
                     Description = c('Each participant is assumed to travel to the garden closest to them', 
-                                    'All participants are assumed to travel to a single location in Paris', 
+                                    'All participants are assumed to travel to a single location',
+                                    'All participants are assumed to travel to a single location resulting in minimal emissions', 
+                                    'All participants are assumed to travel to a single location resulting in maximal emissions', 
                                     'All participants are assumed to attend online'),
-                    `CO2 emissions (kg)` = c(NA,NA,NA),
-                    `Standard deviation (kg)` = c(NA,NA,NA))
+                    `CO2 emissions (kg)` = c(NA,NA,NA,NA,NA),
+                    `Standard deviation (kg)` = c(NA,NA,NA,NA,NA))
 
 
 
@@ -205,7 +208,7 @@ nud %>% group_by(Garden) %>%
 Dans chaque Garden, on resample parmi les moyens de transport utilisés
 
 ```{r, rows.print=100}
-nrep <- 100
+nrep <- 1000
 # On reprend les facteurs d'émission
 nud <- d %>% 
   left_join(EF, by = join_by(transport_in == transport)) %>%
@@ -266,28 +269,43 @@ scenarios <- scenarios %>%
 
 
 ```{r, rows.print=100}
+rsmpds <- rsmpds %>% 
+  select(-contains('N')) %>%
+  left_join(Gardens%>% select(garden, N), by = join_by(garden))
+
 rsmpds %>%
   ungroup() %>%
-  select(garden, mCO2_tot, sdCO2_tot) %>%
+  select(garden, mCO2_tot, sdCO2_tot, N) %>%
   bind_rows(tibble(garden = 'Total',
                    mCO2_tot = sum(.$mCO2_tot),
-                   sdCO2_tot = round(sqrt(sum(.$sdCO2_tot^2))))) %>%
-  kable(caption = 'Estimated CO2eq emissions due to transportation in the Cutting Gardens Scenario', col.names = c('Garden', 'Average CO2 emissions (kg)', 'standard deviation (kg)'),
+                   sdCO2_tot = round(sqrt(sum(.$sdCO2_tot^2))),
+                   N = sum(.$N)))  %>%
+  kable(caption = 'Estimated CO2eq emissions due to transportation in the Cutting Gardens Scenario', col.names = c('Garden', 'Average CO2 emissions (kg)', 'standard deviation (kg)', 'Number of local participants'),
         digits = 0) %>%
   kable_styling(latex_options = "striped") %>%
   row_spec(1:(nrow(rsmpds)+1), extra_css = "padding: 0px") %>%
   row_spec(nrow(rsmpds)+1, bold = T)
 
 # a barplot based on rsmpds with x = garden, y = emissions, color = garden, with errorbars = sd
-ggplot(rsmpds %>% mutate(mCO2_tot = mCO2_tot / 1000, sdCO2_tot = sdCO2_tot / 1000), aes(x=garden, y=mCO2_tot, fill=garden)) + 
+ggplot(rsmpds, 
+       aes(x=garden, y=mCO2_tot, fill=garden)) + 
   geom_bar(stat="identity", width=1, color = 'black', show.legend = F) +
   geom_errorbar(aes(ymin=mCO2_tot-sdCO2_tot, ymax=mCO2_tot+sdCO2_tot), width=.2,
                 position=position_dodge(1)) +
+  # geom_point(aes(y = N * 50), color = 'red', size = 2, position = position_dodge(1), show.legend = F) +
+  # reorder x axis labels by mCO2_tot using package forcats
+  scale_x_discrete(limits = levels(fct_reorder(rsmpds$garden, -rsmpds$mCO2_tot))) +
   # add a layer of dots with individual values picked from rsmpd
-  # geom_point(data = rsmpd %>% filter(garden != 'Total'), aes(x=garden, y=CO2_tot / 1000), position = position_jitterdodge(.2), alpha = 0.2, show.legend = F) +
+  # geom_point(data = rsmpd %>% filter(garden != 'Total'), aes(x=garden, y=CO2_tot), position = position_jitterdodge(.2), alpha = 0.2, show.legend = F) +
+  scale_y_continuous(labels = scales::number_format(scale = 1e-3)) +
   coord_flip() +
-  labs(x = NULL, y = expression(paste('CO2 emissions (10'^'3',' kg)')), fill = NULL) +
+  labs(x = NULL, y = expression(paste('CO2 emissions (10'^'6',' kg)')), fill = NULL) +
   theme_minimal()
+
+ggplot(rsmpds,
+       aes(x=N, y=mCO2_tot, col=garden)) +
+  scale_color_discrete(limits = levels(fct_reorder(rsmpds$garden, -rsmpds$mCO2_tot))) +
+  geom_point()
 
 # # plot rsmpd with ggplot boxplot
 # ggplot(rsmpd, aes(x="", y=CO2_tot, fill=garden)) +
@@ -306,31 +324,31 @@ ggplot(rsmpds %>% mutate(mCO2_tot = mCO2_tot / 1000, sdCO2_tot = sdCO2_tot / 100
 
 ```
 
-## Now assuming a single central location in Paris
+## Now assuming a single central location
+
+Assuming all \< a certain distance use train, above use plane
 
 ```{r}
-TheGarden <- tibble(garden.city = 'Paris', garden.country = 'France') %>%
-  mutate(across(is.character, str_to_lower)) %>%
-  mutate(across(is.character, trimws)) %>% 
+TheOlnyGarden <- tibble(garden.city = 'Caen', garden.country = 'France') %>%
+  mutate(garden_str = sprintf('%s (%s)',garden.city, garden.country)) %>%
+  mutate(across(starts_with('garden.'), str_to_lower)) %>%
+  mutate(across(starts_with('garden.'), trimws)) %>% 
   unite(garden, garden.city, garden.country, sep = ' ; ', remove = F) %>%
   left_join(location_codes, by = join_by( garden == origin)) %>%
   rename(garden.lon = origin.lon, garden.lat = origin.lat)
 
-```
+scenarios <- scenarios %>%
+  mutate(Scenario = replace(Scenario, Scenario == "One Location in XXX", sprintf("One Location in %s", TheOlnyGarden$garden_str)))
 
-
-Assuming all \< a certain distance use train, above use plane
-
-```{r, fig.width=7, fig.height=4}
 alldmin <- seq(300,1500,50)
-nrep <- 10
+nrep <- 1000
 
 toplot = tibble()
 for (dmin in alldmin) { 
-  # below, we compute distances and CO2 to TheGarden on the fly and restore original garden names afterwards
+  # below, we compute distances and CO2 to TheOlnyGarden on the fly and restore original garden names afterwards
   nud <- d %>%
     rename_with(.cols = starts_with('garden'),.fn =  ~ paste0('actual.',.x)) %>%
-    bind_cols(TheGarden) %>%
+    bind_cols(TheOlnyGarden) %>%
     mutate(origin.garden.distance_km = distCosine(as.matrix(cbind(origin.lon,origin.lat)),
                                                   as.matrix(cbind(garden.lon, garden.lat))) / 1000) %>%
     select(-starts_with('garden')) %>%
@@ -345,7 +363,7 @@ for (dmin in alldmin) {
            CO2_out = EF_out * origin.garden.distance_km,
            CO2_tot = CO2_in + CO2_out)
   
-  # So in nud, all distances refer to TheGarden
+  # So in nud, all distances refer to TheOlnyGarden
   
   # for each garden, bootstrap resample the right number of pple, compute CO2, store
   rsmpd <- tibble()
@@ -388,25 +406,27 @@ for (dmin in alldmin) {
   if (dmin == 800) {
     # we store the result in the scenario table only for dmin = 800 km
     scenarios <- scenarios %>%
-      mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "One Location", rsmpds %>% filter(garden == 'Total') %>% .$mCO2_tot),
-             `Standard deviation (kg)` = replace(`Standard deviation (kg)`, Scenario == "One Location", rsmpds %>% filter(garden == 'Total') %>% .$sdCO2_tot))  
+      mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, str_starts(Scenario,"One Location in"), rsmpds %>% filter(garden == 'Total') %>% .$mCO2_tot),
+             `Standard deviation (kg)` = replace(`Standard deviation (kg)`, str_starts(Scenario,"One Location in"), rsmpds %>% filter(garden == 'Total') %>% .$sdCO2_tot))  
   }
 }
+# find out if a string starts with 'one location in'
 
-p1 <- ggplot(toplot, aes(x=dmin, y=mCO2_tot / 1000,
-                         ymin = (mCO2_tot - sdCO2_tot) / 1000,
-                         ymax = (mCO2_tot + sdCO2_tot) / 1000)) +
+
+p1 <- ggplot(toplot, aes(x=dmin, y=mCO2_tot,
+                         ymin = (mCO2_tot - sdCO2_tot),
+                         ymax = (mCO2_tot + sdCO2_tot))) +
   geom_ribbon(alpha = 0.2) +
   geom_line() +
   # geom_point() +
   # scale_x_reverse() +
   # ylim(1000, 1300) +
-  labs(x = 'Distance threshold for flying (km)', y = 'Total CO2 emissions (tons)', title = 'Conference CO2 emissions as a function of \ndistance for switching from train to plane') + 
+  labs(x = 'Distance threshold for flying (km)', y = 'Total CO2 emissions (kg)', title = 'Conference CO2 emissions as a function of \ndistance for switching from train to plane') + 
   theme_minimal()
 
 p2 <- ggplot(nud, aes(x = origin.garden.distance_km, fill = origin.country)) +
   geom_histogram(bins = 30) +
-  labs(x = 'Distance to Paris (km)', y = 'frequency', title = 'Distance to Paris') +
+  labs(x = sprintf('Distance to %s (km)', TheOlnyGarden$garden_str), y = 'frequency', title = sprintf('Distance to %s (km)', TheOlnyGarden$garden_str)) +
   theme_minimal() #+ theme(legend.position = 'bottom', legend.box="vertical", legend.margin=margin())
 
 p1
@@ -417,17 +437,19 @@ p2
 ## Now same computation for any central garden
 
 ```{r, fig.width=7, fig.height=4}
-toplot = tibble()
+scenario2 = tibble()
 alldmin <- seq(300,1500,50)
-nrep <- 10
+nrep <- 1000
 allGardens_plusBaryCenter = Gardens
 # %>%
 #   bind_rows( summarize(Gardens, garden = 'Barycenter', 
 #                        garden.lon = weighted.mean(garden.lon,N),
 #                        garden.lat = weighted.mean(garden.lat,N), 
 #                        N = sum(N)))
-
-for (i_garden in 1:nrow(allGardens_plusBaryCenter)){
+# encapsulate this loop in a function
+compute_scenario2 <- function(i_garden) {
+#for (i_garden in 1:nrow(allGardens_plusBaryCenter)){#
+  print(i_garden)
 
   TheGarden <- allGardens_plusBaryCenter[i_garden,]
   
@@ -486,26 +508,44 @@ for (i_garden in 1:nrow(allGardens_plusBaryCenter)){
                        mCO2_tot = sum(.$mCO2_tot),
                        sdCO2_tot = round(sqrt(sum(.$sdCO2_tot^2)))))
     # for plotting, we only keep the total
-    toplot <- rsmpds %>% filter(garden == 'Total') %>%
+    scenario2 <- rsmpds %>% filter(garden == 'Total') %>%
       mutate(garden = TheGarden$garden) %>%
       mutate(dmin = dmin) %>%
       select(dmin,garden,mCO2_tot, sdCO2_tot) %>%
-      bind_rows(toplot)
+      bind_rows(scenario2)
     
     # if (dmin == 800) {
     #   # we store the result in the scenario table only for dmin = 800 km
     #   scenarios <- scenarios %>%
-    #     mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "One Location", rsmpds %>% filter(garden == 'Total') %>% .$mCO2_tot),
-    #            `Standard deviation (kg)` = replace(`Standard deviation (kg)`, Scenario == "One Location", rsmpds %>% filter(garden == 'Total') %>% .$sdCO2_tot))  
+    #     mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, starts_with(Scenario,"One Location in"), rsmpds %>% filter(garden == 'Total') %>% .$mCO2_tot),
+    #            `Standard deviation (kg)` = replace(`Standard deviation (kg)`, starts_with(Scenario,"One Location in"), rsmpds %>% filter(garden == 'Total') %>% .$sdCO2_tot))  
     # }
     
   }
+  scenario2
 }
+
+library('parallel')
+# start a parallel pool
+cl <- makeCluster(detectCores() - 1)
+# add useful variables to the environment
+clusterExport(cl, c('allGardens_plusBaryCenter', 'd', 'EF', 'Gardens', 'alldmin', 'nrep', 'scenario2'))
+# load the necessary libraries
+clusterEvalQ(cl, {
+  library('tidyverse')
+  library('geosphere')
+})
+tmpscenario2 <- parLapply(cl, 1:nrow(allGardens_plusBaryCenter), compute_scenario2)
+# stop the parallel pool
+stopCluster(cl)
+# bind_rows of all elements of scenario2
+scenario2 <- bind_rows(tmpscenario2)
+
 ```
 
 
 ```{r, fig.width=7, fig.height=4}
-toplot <-  toplot %>%
+toplot <-  scenario2 %>%
        # capitalize garden names
        mutate(garden = str_to_title(garden)) %>%
          # capitalize UK and USA in garden names
@@ -516,36 +556,47 @@ toplot <-  toplot %>%
          # move Barycenter last
          # mutate(garden = fct_relevel(garden, 'Barycenter', after = Inf))
 
-ggplot(toplot, aes(x=dmin, y=mCO2_tot / 1000,
-                         ymin = (mCO2_tot - sdCO2_tot) / 1000,
-                         ymax = (mCO2_tot + sdCO2_tot) / 1000,
+ggplot(toplot, aes(x=dmin, y=mCO2_tot,
+                         ymin = (mCO2_tot - sdCO2_tot),
+                         ymax = (mCO2_tot + sdCO2_tot),
              col = garden, group = garden)) +
   # geom_ribbon(alpha = 0.2) +
   geom_line() +
   # geom_point() +
   # scale_x_reverse() +
   # ylim(1000, 1300) +
-  labs(x = 'Distance threshold for flying (km)', y = 'Total CO2 emissions (tons)',) +
+  labs(x = 'Distance threshold for flying (km)', y = 'Total CO2 emissions (10⁶ kg)',) +
   # ggtitle('Conference CO2 emissions as a function of \ndistance for switching from train to plane') + 
-  theme_minimal()
+  theme_minimal() +
+  guides(col = guide_legend(title = NULL, ncol = 1, position = 'right')) +
+  theme(legend.key.height = unit(.4, 'cm')) +
+  # replace 000 by 10³ in y axis ticks
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6)) 
+
 # highlight Barycenter values with a different line width
   # geom_line(data = toplot %>% filter(garden == 'Barycenter'), size = 1.5, show.legend = F)
   
 # # a tile plot showing mCO2_tot in color for each garden. x is dmin, y is garden, color is mCO2_tot
 # ggplot(toplot,
-#        aes(x=dmin, y=garden, fill=mCO2_tot / 1000)) +
+#        aes(x=dmin, y=garden, fill=mCO2_tot)) +
 #   geom_tile() +
 #   # # add written values at dmin = 300 (align left),
-#   geom_label(data = toplot %>% filter(dmin == 300), aes(label = round(mCO2_tot / 1000)), hjust = 0, vjust = .6, col = 'white') +
+#   geom_label(data = toplot %>% filter(dmin == 300), aes(label = round(mCO2_tot)), hjust = 0, vjust = .6, col = 'white') +
 #   # # add written values at dmin = 1500 (align right)
-#   geom_label(data = toplot %>% filter(dmin == 1500), aes(label = round(mCO2_tot / 1000)), hjust = 1, vjust = .6, col = 'white') +
+#   geom_label(data = toplot %>% filter(dmin == 1500), aes(label = round(mCO2_tot)), hjust = 1, vjust = .6, col = 'white') +
 #   scale_fill_viridis_c() +
-#   labs(x = 'Distance threshold for flying (km)', y = 'Garden', fill = 'Total CO2 emissions (tons)') +
+#   labs(x = 'Distance threshold for flying (km)', y = 'Garden', fill = 'Total CO2 emissions (kg)') +
 #   theme_minimal()
 
+    scenarios <- scenarios %>%
+      mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "One Location (min)", toplot %>% filter(mCO2_tot == min(mCO2_tot)) %>% .$mCO2_tot),
+             `Standard deviation (kg)` = replace(`Standard deviation (kg)`, Scenario == "One Location (min)", toplot %>% filter(mCO2_tot == min(mCO2_tot)) %>% .$sdCO2_tot),
+             `CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "One Location (max)", toplot %>% filter(mCO2_tot == max(mCO2_tot)) %>% .$mCO2_tot),
+             `Standard deviation (kg)` = replace(`Standard deviation (kg)`, Scenario == "One Location (max)", toplot %>% filter(mCO2_tot == max(mCO2_tot)) %>% .$sdCO2_tot))  
 
 #print the minimal mCO2_tot row
 toplot %>% filter(mCO2_tot == min(mCO2_tot))
+
 
 # print the maximal mCO2_tot row
 toplot %>% filter(mCO2_tot == max(mCO2_tot))
@@ -556,24 +607,43 @@ toplot %>% filter(dmin == 800) %>% filter(mCO2_tot == min(mCO2_tot))
 ```
 
 ## Conclusion
-```{r}
+```{r fig.height=5}
 scenarios <- scenarios %>%
 mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "Online", 5512)) 
 
-
+# remove the one location paris line
+toplot <- scenarios %>% filter(Scenario != "One Location (min)" & Scenario != "One Location (max)") %>%
+  mutate(Scenario = str_replace(Scenario,sprintf("One Location in %s", TheOlnyGarden$garden_str), 'One Location')) %>%
+  # replace the value in One Location (Paris) by the value in scenario2 for garden caen
+  mutate(`CO2 emissions (kg)` = replace(`CO2 emissions (kg)`, Scenario == "One Location", scenario2 %>% filter(dmin == 800) %>% .$mCO2_tot),
+         `Standard deviation (kg)` = replace(`Standard deviation (kg)`, Scenario == "One Location", scenario2 %>% filter(dmin == 800) %>% .$sdCO2_tot))
 scenarios %>%
   kable(caption = 'Summary of CO2 emissions for the different scenarios', col.names = c('Scenario', 'Description', 'CO2 emissions (kg)', 'Standard deviation (kg)'),
         digits = 0) %>%
   kable_styling(latex_options = "striped")
 
-ggplot(scenarios, aes(x = Scenario, y = `CO2 emissions (kg)`, fill = Scenario)) +
+shift_trans = function(d = 0) {
+  scales::trans_new("shift", transform = function(x) x - d, inverse = function(x) x + d)
+}
+
+
+ggplot(toplot, aes(x = Scenario, y = `CO2 emissions (kg)`, fill = Scenario)) +
   geom_bar(stat = 'identity') +
-  geom_errorbar(aes(ymin = `CO2 emissions (kg)` - `Standard deviation (kg)`, ymax = `CO2 emissions (kg)` + `Standard deviation (kg)`), width = 0.1) +
-  labs(x = "Scenario", y = 'CO2 emissions (kg)', fill = NULL) +
-  scale_fill_manual(values = c("#3CAF46", "#FF3838", "grey")) +
-  # scale_y_log10() +
+  geom_linerange(aes(ymin = `CO2 emissions (kg)` - `Standard deviation (kg)`, ymax = `CO2 emissions (kg)` + `Standard deviation (kg)`), col = 'black') +
+  labs(x = "Scenario", y = 'CO2 emissions (10⁶ kg)', fill = NULL) +
+  # make sure the y ticks are shown in decimal format
+  scale_y_continuous(labels = scales::number_format(scale = 1e-6)) +
+  # ylim(0, 1e7) +
+  scale_fill_manual(values = c("#7BA8E6", "#D0282D", "#9C66AC")) +
   theme_minimal() +
-  theme(axis.text.x=element_blank())
+  theme(axis.text.x=element_blank(),
+        text = element_text(size = 16)) +
+  # add two points with the values of one location (min) and one location (max) stored in scenarios at x value of one location (TheGarden)
+  ggbeeswarm::geom_beeswarm(data = scenario2 %>% filter(dmin == 800), aes(x = sprintf("One Location in %s", TheOlnyGarden$garden_str), y = mCO2_tot), fill = NA,col = 'black', size = 1, alpha = .3, show.legend = T) 
+  
+
+# capitalize garden names
+# mutate(garden = str_to_title(garden)) %>%
 
 ```
 
