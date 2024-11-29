@@ -565,13 +565,13 @@ ggplot(toplot, aes(x=dmin, y=mCO2_tot,
   # geom_point() +
   # scale_x_reverse() +
   # ylim(1000, 1300) +
-  labs(x = 'Distance threshold for flying (km)', y = 'Total CO2 emissions (10⁶ kg)',) +
+  labs(x = 'Distance threshold for flying (km)', y = 'Total CO2 emissions (10³ kg)',) +
   # ggtitle('Conference CO2 emissions as a function of \ndistance for switching from train to plane') + 
   theme_minimal() +
   guides(col = guide_legend(title = NULL, ncol = 1, position = 'right')) +
   theme(legend.key.height = unit(.4, 'cm')) +
   # replace 000 by 10³ in y axis ticks
-  scale_y_continuous(labels = scales::number_format(scale = 1e-6)) 
+  scale_y_continuous(labels = scales::number_format(scale = 1e-3)) 
 
 # highlight Barycenter values with a different line width
   # geom_line(data = toplot %>% filter(garden == 'Barycenter'), size = 1.5, show.legend = F)
@@ -596,6 +596,7 @@ ggplot(toplot, aes(x=dmin, y=mCO2_tot,
 
 #print the minimal mCO2_tot row
 toplot %>% filter(mCO2_tot == min(mCO2_tot))
+toplot %>% filter(garden == 'Caen ; France') %>% filter(dmin == 1500)
 
 
 # print the maximal mCO2_tot row
