@@ -1,0 +1,346 @@
+---
+title: "CuttingEEG 2021 travel carbonfootprint data"
+output:
+  html_notebook: 
+    df_print: paged
+    toc: yes
+---
+
+Working with results of form <https://docs.google.com/spreadsheets/d/1BMz60ePj7zw-_9aMgDuWToLPP-1YFPBPYZ7UUgwLS7c/edit#gid=187982164>
+
+```{r message=F}
+library(tidyverse)
+library(ggmap)
+library(geosphere)
+register_google(key=read_file('google_key.txt'))
+# dum <- geocode('Paris, Fr')
+
+
+```
+
+## Gather form responses
+
+```{r}
+d <- readr::read_csv('Réponses_Cutting2021.csv',show_col_types = F) %>%
+  select(starts_with('[Carbon footprint]')) %>%
+  rename(origin = '[Carbon footprint] Where did you travel from? (City ; Country)',
+         transport_in = '[Carbon footprint] How did you get to Aix-en-Provence?',
+         transport_out = '[Carbon footprint] How did you leave Aix-en-Provence?',
+         HowLong = '[Carbon footprint] How long did you stay away from your living town? (including collabortions and presenting/attending other conferences)') %>%
+  rowwise() %>%
+  mutate(transport_in = ifelse(str_detect(transport_in, regex('plane',ignore_case = T)),'plane',
+                               ifelse(str_detect(transport_in, regex('car',ignore_case = T)),'car',
+                                      ifelse(str_detect(transport_in, regex('train',ignore_case = T)),'train',
+                                             str_to_lower(transport_in)))),
+         transport_out = ifelse(transport_out == 'Same as I came!', transport_in, str_to_lower(transport_out)))
+```
+
+## Get locations and maps
+
+```{r}
+location_codes <- read_csv('locationCodes.csv',col_types = 'cdd') %>%
+  mutate(origin = str_replace(origin, '(.*?) ?\\((.*)\\)','\\1 ; \\2'))
+allcities <- levels(as.factor(d$origin))
+
+for (c in allcities) {
+  if (! c %in% location_codes$origin) {
+    lonlat <- geocode(c)
+    location_codes <- add_row(location_codes,
+                              origin = c,
+                              lon = lonlat$lon,
+                              lat = lonlat$lat)
+    write_csv(location_codes,'locationCodes.csv')
+  }
+}
+
+# maplarge <- get_map(location=c(lon = 17.3294909,lat = 47.5901692), zoom = 4)
+# mapeu <- get_map(location=c(left=-10,bottom=35,right=25,top=60))
+# mapfr <- get_map(location=c(left=-6,bottom=42,right=10,top=52))
+
+```
+
+## Combine all
+
+```{r}
+d <- left_join(d,location_codes,by='origin') %>%
+  separate(col = origin, into = c('city','country'), sep=';', remove=F) %>%
+  mutate(country = trimws(country),
+         destination = 'Aix-en-Provence (France)',
+         destinationlon = 5.447427,
+         destinationlat = 43.52974,
+         distance_km = distCosine(as.matrix(cbind(destinationlon,destinationlat)),
+                          as.matrix(cbind(lon,lat))) / 1000)
+
+dl <- d %>%
+  pivot_longer(starts_with('transport_'),names_to = 'in_out',values_to = 'transportation')
+```
+
+## Some data on countries and CO2 emissions per transport
+
+```{r}
+country_codes <- read_csv('countryCodes.csv',col_types = 'ddc') 
+allcountries <- levels(as.factor(d$country))
+
+for (c in allcountries) {
+  if (! c %in% country_codes$country) {
+    lonlat <- geocode(c)
+    country_codes <- add_row(country_codes,
+                              country = c,
+                              lon = lonlat$lon,
+                              lat = lonlat$lat)
+    write_csv(country_codes,'countryCodes.csv')
+  }
+}
+
+country_codes <- country_codes %>%  
+mutate(destinationlon = 5.447427,
+         destinationlat = 43.52974,
+         distance.country = distCosine(as.matrix(cbind(destinationlon,destinationlat)),
+                                       as.matrix(cbind(lon,lat))) / 1000) %>%
+  select(-starts_with('destination'))
+# countrylevels <- as.character(unique(arrange(country_codes,distance.country)$country))
+
+
+CO2PerPersonTransport <- as.tibble(read.csv('CO2PerPersonTransport.csv')) %>%
+  mutate(mode.de.transport = str_to_lower(mode.de.transport))
+
+```
+
+## Combine with data
+
+```{r}
+d <- d %>%
+  left_join(country_codes,by='country',suffix = c('.city','.country')) %>%
+  select(-starts_with('inkg'),
+         -starts_with('outkg'))%>%
+  left_join(CO2PerPersonTransport,by=c('transport_in' = 'mode.de.transport')) %>%
+  rename(inkg.km = kg.CO2eq.pasager.km) %>%
+  left_join(CO2PerPersonTransport,by=c('transport_out' = 'mode.de.transport'))%>%
+  rename(outkg.km = kg.CO2eq.pasager.km) %>%
+  mutate(inkg = inkg.km * distance_km,
+         outkg = outkg.km * distance_km,
+         kgtotal = inkg + outkg,
+         transport_in = factor(transport_in,levels=str_to_lower(c( "Plane", "Train","Metro or RER", "City bus", "Intercity coach", "Car", "Bike", "Feet" ))),
+         transport_out = factor(transport_out,levels=str_to_lower(c( "Plane", "Train","Metro or RER", "City bus", "Intercity coach", "Car", "Bike", "Feet" )))) 
+
+write_csv(d,'CO2transport.csv')
+
+dl <- left_join(dl,country_codes,by='country',suffix = c('.city','.country')) %>%
+  left_join(CO2PerPersonTransport,by=c('transportation' = 'mode.de.transport')) %>%
+  select(-contains('kg.km')) %>%
+  rename(kg.km = kg.CO2eq.pasager.km) %>%
+  mutate(kg = kg.km * distance_km,
+         transportation = factor(transportation,levels=str_to_lower(c( "Plane", "Train","Metro or RER", "City bus", "Intercity coach", "Car", "Bike", "Feet" ))))
+
+dc <- d %>%
+  group_by(country, lon.country, lat.country) %>%
+  summarize(n=n(),kgtotal = sum(kgtotal))
+
+```
+
+```{r}
+sum(d$kgtotal)
+sum(d$inkg)
+sum(d$outkg)
+```
+
+```{r}
+# ggmap(maplarge)+
+#   geom_point(data=dc, aes(x=lon.country, y=lat.country,size=n,stroke=.5),shape = 21, fill = '#3EDAFB',show.legend = F)+
+#   geom_text(data=dc, aes(x=lon.country, y=lat.country,label=n))+
+#   theme_grey(base_size = 17) +
+#   scale_size(range=c(7,15))
+#   
+# ggsave('WorldBubbleMap.png',width=10,height=6)
+
+```
+
+```{r}
+# ggmap(maplarge)+
+#   geom_point(data=dc, aes(x=lon.country, y=lat.country,size=kgtotal/n,stroke=.5),shape = 21, fill = '#3EDAFB',show.legend = F)+
+#   geom_text(data=dc, aes(x=lon.country, y=lat.country,label=n))+
+#   theme_grey(base_size = 17) +
+#   scale_size(range=c(7,25))
+  
+```
+
+```{r}
+# ggmap(mapeu)+
+#   geom_point(data=dc, aes(x=lon.country, y=lat.country,size=n,stroke=.5),shape = 21, fill = '#3EDAFB',show.legend = F)+
+#   geom_text(data=dc, aes(x=lon.country, y=lat.country,label=n))+
+#   theme_grey(base_size = 17) +
+#   scale_size(range=c(7,15))
+
+```
+
+```{r}
+
+data <- dl  %>%
+  group_by(transportation) %>%
+  summarize(n = n(),kg = sum(kg)) %>%
+  arrange(desc(kg)) %>%
+  mutate(prop = n / sum(n) *100,
+         prop_kg =kg / sum(kg) *100) %>%
+  mutate(ypos = cumsum(n)- 0.5*n,
+         ypos_kg = cumsum(kg) - .5*kg)
+# data <- bind_rows(data[,c(1,2,4,6)],rename(data[,c(1,3,5,7)],
+#                                n = kg,
+#                                prop= prop_kg,
+#                                ypos=ypos_kg),.id = 'nkg')
+
+
+ggplot(data, aes(x="", y=n, fill=transportation)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + 
+  theme(legend.title = element_blank()) +#legend.position="none"
+  geom_text(aes(y = ypos, label = ifelse(prop>10,paste0(sprintf('%.f',prop),'%'),'')), color = "black", size=6) +
+  scale_fill_brewer(palette="Set2") +
+  ggtitle('Means of transportation used')
+# +
+#   transition_states(nkg, transition_length = 1, state_length = 1,
+#   wrap = TRUE)
+
+
+
+ggplot(data, aes(x="", y=kg, fill=transportation)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + 
+  theme(legend.title = element_blank()) +#legend.position="none"
+  geom_text(aes(y = ypos_kg, label = ifelse(prop_kg>10,paste0(sprintf('%.f',prop_kg),'%'),'')), color = "black", size=6) +
+  scale_fill_brewer(palette="Set2") +
+  ggtitle('Proportion CO2 emitted by means of transportation used')
+
+dl %>% 
+ group_by(transportation) %>%
+ summarize(kg = format(sum(kg), digits = 2),n = n())
+
+# knitr::kable(dl %>% 
+#  group_by(transportation) %>%
+#  summarize(kg = sum(kg),n = n()), format = 'html',
+#  digits = 2)
+```
+
+```{r}
+
+data <- dl %>% 
+  group_by(transportation,country,lon.country,lat.country,destinationlon,destinationlat) %>%
+  summarize(n = n(),kg = sum(kg)) 
+data <- data %>%
+  arrange(desc(transportation)) %>%
+  group_by(country) %>%
+  mutate(sumn = sum(n), sumkg = sum(kg),
+         prop = n / sumn *100,
+         prop_kg = kg / sumkg *100) %>%
+  mutate(ypos = cumsum(n)- 0.5*n,
+         ypos_kg = cumsum(kg) - .5*kg) %>%
+  ungroup() %>%
+  mutate(country = factor(country,levels=allcountries)
+         )
+
+ggplot(data, aes(x="", y=prop, fill=transportation)) +
+  geom_bar(stat="identity", width=1, color="white",position='fill') +
+  coord_polar("y", start=0) +
+  theme_void() + 
+  theme(legend.title = element_blank()) +#legend.position="none"
+  # geom_text(aes(y = ypos, label = ifelse(prop>10,paste0(sprintf('%.f',prop),'%'),'')), color = "black") +
+  scale_fill_brewer(palette="Set2") +
+  ggtitle('Means of transportation used') +
+  facet_wrap(~country)
+
+ggplot(data, aes(x="", y=kg, fill=transportation)) +
+  geom_bar(stat="identity", width=1, color="white",position='fill') +
+  coord_polar("y", start=0) +
+  theme_void() + 
+  theme(legend.title = element_blank()) +#legend.position="none"
+  # geom_text(aes(y = ypos_kg, label = ifelse(prop_kg>10,paste0(sprintf('%.f',prop_kg),'%'),'')), color = "black", size=6) +
+  scale_fill_brewer(palette="Set2") +
+  ggtitle('Proportion CO2 emitted by means of transportation used') +
+  facet_wrap(~country)
+
+
+```
+
+```{r}
+
+data <- dl %>% 
+  group_by(transportation,country,lon.country,lat.country,destinationlon,destinationlat) %>%
+  summarize(n = n(),kg = sum(kg)) 
+data <- data %>%
+  arrange(desc(transportation)) %>%
+  group_by(country) %>%
+  mutate(sumn = sum(n), sumkg = sum(kg),
+         prop = n / sumn *100,
+         prop_kg = kg / sumkg *100) %>%
+  mutate(ypos = cumsum(n)- 0.5*n,
+         ypos_kg = cumsum(kg) - .5*kg) %>%
+  ungroup() %>%
+  mutate(country = factor(country,levels=allcountries)
+         )
+
+ggplot(data, aes(x="", y=prop, fill=transportation)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  # coord_polar("y", start=0) +
+  theme_void() + 
+  theme(legend.title = element_blank()) +#legend.position="none"
+  # geom_text(aes(y = ypos, label = ifelse(prop>10,paste0(sprintf('%.f',prop),'%'),'')), color = "black") +
+  scale_fill_brewer(palette="Set2") +
+  ggtitle('Means of transportation used') +
+  facet_wrap(~country)
+
+ggplot(data, aes(x="", y=kg, fill=transportation)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  # coord_polar("y", start=0) +
+  # scale_y_log10() + 
+  theme(legend.title = element_blank()) +#legend.position="none"
+  # geom_text(aes(y = ypos_kg, label = ifelse(prop_kg>10,paste0(sprintf('%.f',prop_kg),'%'),'')), color = "black", size=6) +
+  scale_fill_brewer(palette="Set2") +
+  ggtitle('Proportion CO2 emitted by means of transportation used') +
+  facet_wrap(~country)
+
+
+```
+
+```{r}
+
+# dgrant <- filter(d,!is.na(green.grant)) %>%
+#   select(-ends_with('kg.km')) %>%
+#   mutate(green.grant = 'No grant',
+#          transport_in = 'Plane',transport_out = 'Plane') %>%
+#   left_join(CO2,by=c('transport_in' = 'mode.de.transport')) %>%
+#   rename(inkg.km = kg.CO2eq.pasager.km) %>%
+#   left_join(CO2,by=c('transport_out' = 'mode.de.transport')) %>%
+#   rename(outkg.km = kg.CO2eq.pasager.km) %>%
+#   mutate(inkg = inkg.km * distance_km,
+#          outkg = outkg.km * distance_km,
+#          kgtotal = inkg + outkg,
+#          transport_in = factor(transport_in,levels=c( "Plane", "Train","Metro or RER", "City bus", "Intercity coach", "Car", "Bike", "Feet" )),
+#          transport_out = factor(transport_out,levels=c( "Plane", "Train","Metro or RER", "City bus", "Intercity coach", "Car", "Bike", "Feet" ))) 
+# 
+# dnogrant <- filter(d,!is.na(green.grant)) %>%
+#   mutate(green.grant = 'Grant')
+# 
+# dtoutgrant <- bind_rows(dnogrant,dgrant) 
+# 
+# m.dtoutgrant <- dtoutgrant %>%
+#   group_by(green.grant) %>%
+#   summarise(m.kgtotal = mean(kgtotal))
+# 
+# ggplot(m.dtoutgrant,aes(x=green.grant,y=m.kgtotal)) +
+#   geom_col() + geom_beeswarm(data=dtoutgrant,aes(y=kgtotal,col=origin)) +
+#   theme_minimal(base_size = 17) +
+#   theme() +
+#   ggtitle('Kg CO2 with or without Green Grant',subtitle='for each of the 6 awarded individuals') +
+#   xlab('') + ylab('Average kg CO2')
+```
+
+```{r}
+library(ggbeeswarm)
+ggplot(d,aes(x=interaction(transport_in,transport_out),y= kgtotal, fill=transport_in)) +
+  geom_violin() + 
+  geom_beeswarm(priority = 'density',size=3,alpha=.5,cex=1.5) +
+  # geom_label(aes(label=kgtotal)) +
+  theme(axis.text.x = element_text(angle=30,hjust=1)) +
+  scale_y_log10()
+```
