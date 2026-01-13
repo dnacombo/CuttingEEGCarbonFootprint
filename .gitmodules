@@ -1,0 +1,3 @@
+[submodule "practicalMEEG_carbonfootprint"]
+	path = practicalMEEG_carbonfootprint
+	url = https://github.com/dnacombo/practicalMEEG_carbonfootprint.git
