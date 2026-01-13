@@ -2,7 +2,7 @@
 title: "CuttingGardens 2023 Carbon footprint analysis"
 date: today
 output:
-  html_document:
+  html_notebook:
     df_print: paged
 editor_options:
   chunk_output_type: inline
@@ -571,7 +571,10 @@ ggplot(toplot, aes(x=dmin, y=mCO2_tot,
   guides(col = guide_legend(title = NULL, ncol = 1, position = 'right')) +
   theme(legend.key.height = unit(.4, 'cm')) +
   # replace 000 by 10³ in y axis ticks
-  scale_y_continuous(labels = scales::number_format(scale = 1e-3)) 
+  scale_y_continuous(labels = scales::number_format(scale = 1e-3)) +
+  theme(text = element_text(size = 12, family = 'Arial'))
+
+  ggsave(filename = 'Gardens_paper_Fig2b.png', dpi = 300, width = 7, height = 4)
 
 # highlight Barycenter values with a different line width
   # geom_line(data = toplot %>% filter(garden == 'Barycenter'), size = 1.5, show.legend = F)
